@@ -17,10 +17,6 @@ from matplotlib import pyplot as plt
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-KEY_PHRASE_PATTERN = re.compile(
-    r"\bпахан\b[\s,;:!?.-]*\bтоху\b[\s,;:!?.-]*\bопять\b[\s,;:!?.-]*\bобидели\b",
-    re.IGNORECASE,
-)
 DB_PATH = Path("toha_counter.db")
 DEFAULT_TIMEZONE = "Europe/Moscow"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -322,8 +318,9 @@ async def finalize_gas_round(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Зек-водолаз на связи.\n"
-        "Слежу за фразой: «Пахан, Тоху опять обидели».\n\n"
+        "Счетчик увеличивается командой /obideli.\n\n"
         "Команды:\n"
+        "/obideli [число] - добавить в счетчик (по умолчанию +1)\n"
         "/today - сколько раз за сегодня\n"
         "/month - сколько раз за месяц\n"
         "/chart - график по дням за текущий месяц\n"
@@ -376,6 +373,35 @@ async def zona_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def toha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(random.choice(TOHA_STATUS))
+
+
+async def obideli_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+
+    occurrences = 1
+    if context.args:
+        try:
+            occurrences = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Неверный формат. Используй: /obideli 1")
+            return
+
+    if occurrences <= 0:
+        await update.message.reply_text("Число должно быть больше 0.")
+        return
+    if occurrences > 100:
+        await update.message.reply_text("Слишком много за раз. Максимум: 100.")
+        return
+
+    db: CounterDB = context.bot_data["db"]
+    tz: ZoneInfo = context.bot_data["tz"]
+    today_iso = now_local(tz).date().isoformat()
+    new_count = db.add_occurrences(update.effective_chat.id, occurrences, today_iso)
+    await update.message.reply_text(
+        f"Зафиксировано: +{occurrences}.\n"
+        f"Текущий дневной счет: {new_count}."
+    )
 
 
 async def gazy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -541,28 +567,6 @@ async def story_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(story)
 
 
-async def track_phrase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-    raw_text = update.message.text or update.message.caption
-    if raw_text is None:
-        return
-
-    normalized_text = raw_text.lower().replace("ё", "е")
-    matches = KEY_PHRASE_PATTERN.findall(normalized_text)
-    if not matches:
-        return
-
-    db: CounterDB = context.bot_data["db"]
-    tz: ZoneInfo = context.bot_data["tz"]
-    today_iso = now_local(tz).date().isoformat()
-    new_count = db.add_occurrences(update.effective_chat.id, len(matches), today_iso)
-    await update.message.reply_text(
-        f"Зафиксировано: +{len(matches)}.\n"
-        f"Текущий дневной счет: {new_count}."
-    )
-
-
 async def daily_rollover(context: ContextTypes.DEFAULT_TYPE) -> None:
     db: CounterDB = context.bot_data["db"]
     tz: ZoneInfo = context.bot_data["tz"]
@@ -602,14 +606,13 @@ def main() -> None:
     application.add_handler(CommandHandler("today", today_cmd))
     application.add_handler(CommandHandler("month", month_cmd))
     application.add_handler(CommandHandler("chart", chart_cmd))
+    application.add_handler(CommandHandler("obideli", obideli_cmd))
     application.add_handler(CommandHandler("story", story_cmd))
     application.add_handler(CommandHandler("zona", zona_cmd))
     application.add_handler(CommandHandler("toha", toha_cmd))
     application.add_handler(CommandHandler("gazy", gazy_cmd))
     application.add_handler(CommandHandler("mask", mask_cmd))
-    application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, track_gas_activity))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_phrase))
-    application.add_handler(MessageHandler(filters.CAPTION & ~filters.COMMAND, track_phrase))
+    application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, track_gas_activity), group=1)
 
     application.job_queue.run_daily(
         daily_rollover,
