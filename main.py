@@ -21,6 +21,16 @@ DB_PATH = Path("toha_counter.db")
 DEFAULT_TIMEZONE = "Europe/Moscow"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_STORY_MODEL = "stepfun/step-3.5-flash:free"
+BALDNESS_IMAGES_DIR = Path("baldness_images")
+
+# File name in baldness_images -> (baldness grade 1..5, baldness percent).
+BALDNESS_BY_IMAGE = {
+    "toha_1.jpg": (1, 12),
+    "toha_2.jpg": (2, 29),
+    "toha_3.jpg": (3, 47),
+    "toha_4.jpg": (4, 71),
+    "toha_5.jpg": (5, 92),
+}
 
 ZEK_QUOTES = [
     "Зек-водолаз докладывает: глубина обид сегодня зашкаливает.",
@@ -327,6 +337,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/story [тема] - история от ИИ\n"
         "/zona - случайная мудрость с глубин\n"
         "/toha - состояние Тохи\n"
+        "/baldness - случайная картинка + процент облысения\n"
         "/gazy [сек] - начать раунд газа\n"
         "/mask - отметить, что ты выжил в газах\n"
         "/help - подсказка"
@@ -373,6 +384,31 @@ async def zona_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def toha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(random.choice(TOHA_STATUS))
+
+
+async def baldness_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+
+    options: list[tuple[Path, int, int]] = []
+    for filename, (grade, percent) in BALDNESS_BY_IMAGE.items():
+        image_path = BALDNESS_IMAGES_DIR / filename
+        if image_path.is_file():
+            options.append((image_path, grade, percent))
+
+    if not options:
+        await update.message.reply_text(
+            "Не нашел картинок для /baldness.\n"
+            "Положи файлы в папку baldness_images и добавь их в BALDNESS_BY_IMAGE."
+        )
+        return
+
+    image_path, grade, percent = random.choice(options)
+    with image_path.open("rb") as image_file:
+        await update.message.reply_photo(
+            photo=image_file,
+            caption=f"По данным зек-водолаза: степень облысения {grade}/5 ({percent}%).",
+        )
 
 
 async def obideli_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -610,6 +646,7 @@ def main() -> None:
     application.add_handler(CommandHandler("story", story_cmd))
     application.add_handler(CommandHandler("zona", zona_cmd))
     application.add_handler(CommandHandler("toha", toha_cmd))
+    application.add_handler(CommandHandler("baldness", baldness_cmd))
     application.add_handler(CommandHandler("gazy", gazy_cmd))
     application.add_handler(CommandHandler("mask", mask_cmd))
     application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, track_gas_activity), group=1)
