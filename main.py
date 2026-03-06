@@ -32,6 +32,14 @@ ZEK_QUOTES = [
     "На дне все стабильно: Тоха в протоколе обиженных.",
     "Пахан, гидрокостюм порвался, но счетчик держу.",
     "Водолазный этап пройден, обиды Тохи учтены по форме.",
+    "Зек-водолаз на связи: в отсеке обид снова красная лампа.",
+    "По журналу погружений: Тоха поймал внеплановую обидку.",
+    "С глубины передают: Пахан, фиксирую очередной наезд на Тоху.",
+    "Ласты сводит, но отчет сдан: Тоха снова в деле.",
+    "Дежурный по зоне сообщает: уровень драматизма уверенно растет.",
+    "Контрольный всплыв: обида зафиксирована, подпись поставлена.",
+    "Пахан, по форме N-ЗК: Тоха обижен, свидетели есть.",
+    "Подводная братва подтверждает: статистика не врет, Тоху цепляют.",
 ]
 
 TOHA_STATUS = [
@@ -40,7 +48,22 @@ TOHA_STATUS = [
     "Тоха ушел в себя, обещал вернуться с реваншем.",
     "Тоха требует адвоката и чай с сухарями.",
     "Тоха бурчит, но статистика честная.",
+    "Тоха в режиме тихой ярости и громкого вздоха.",
+    "Тоха стабилен: ворчит по расписанию, обижается внепланово.",
+    "Тоха суров, но в душе уже пишет апелляцию.",
+    "Тоха на паузе: копит аргументы и мемы.",
+    "Тоха бодрится, но глаз дергается подозрительно часто.",
+    "Тоха в ресурсе, если не считать моральный износ.",
+    "Тоха собран, сосредоточен и слегка оскорблен.",
+    "Тоха в строю: сарказм заряжен, терпение на нуле.",
 ]
+
+
+@dataclass
+class GasRound:
+    ends_at: datetime
+    participants: dict[int, str]
+    survivors: set[int]
 
 
 @dataclass
@@ -250,6 +273,52 @@ def make_month_chart(points: list[tuple[date, int]], tz_name: str) -> BytesIO:
     return buf
 
 
+def _display_name(update: Update) -> str:
+    user = update.effective_user
+    if user is None:
+        return "Неизвестный"
+    return user.full_name or user.username or f"id:{user.id}"
+
+
+def _register_participant(update: Update, round_state: GasRound) -> None:
+    user = update.effective_user
+    if user is None:
+        return
+    round_state.participants[user.id] = _display_name(update)
+
+
+async def finalize_gas_round(context: ContextTypes.DEFAULT_TYPE) -> None:
+    rounds: dict[int, GasRound] = context.bot_data.get("gas_rounds", {})
+    chat_id = context.job.data.get("chat_id") if context.job and context.job.data else None
+    if chat_id is None:
+        return
+
+    round_state = rounds.pop(chat_id, None)
+    if round_state is None:
+        return
+
+    participant_ids = set(round_state.participants)
+    dead_ids = participant_ids - round_state.survivors
+    survivors_text = ", ".join(round_state.participants[uid] for uid in round_state.survivors if uid in round_state.participants)
+    dead_text = ", ".join(round_state.participants[uid] for uid in dead_ids if uid in round_state.participants)
+
+    if not participant_ids:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Газы рассеялись. Никто не участвовал в раунде.",
+        )
+        return
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "Газы рассеялись.\n"
+            f"Выжили: {survivors_text or 'никто'}.\n"
+            f"Умерли: {dead_text or 'никто'}."
+        ),
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Зек-водолаз на связи.\n"
@@ -261,6 +330,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/story [тема] - история от ИИ\n"
         "/zona - случайная мудрость с глубин\n"
         "/toha - состояние Тохи\n"
+        "/gazy [сек] - начать раунд газа\n"
+        "/mask - отметить, что ты выжил в газах\n"
         "/help - подсказка"
     )
 
@@ -305,6 +376,74 @@ async def zona_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def toha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(random.choice(TOHA_STATUS))
+
+
+async def gazy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+
+    chat_id = update.effective_chat.id
+    rounds: dict[int, GasRound] = context.bot_data.setdefault("gas_rounds", {})
+    if chat_id in rounds:
+        await update.message.reply_text("Раунд уже идет. Пиши /mask, пока не поздно.")
+        return
+
+    duration = 30
+    if context.args:
+        try:
+            duration = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Неверный формат. Используй: /gazy 30")
+            return
+    duration = max(10, min(duration, 300))
+
+    ends_at = datetime.now() + timedelta(seconds=duration)
+    round_state = GasRound(ends_at=ends_at, participants={}, survivors=set())
+    rounds[chat_id] = round_state
+    _register_participant(update, round_state)
+
+    job_name = f"gas_round_end_{chat_id}"
+    for job in context.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+    context.job_queue.run_once(
+        finalize_gas_round,
+        when=duration,
+        data={"chat_id": chat_id},
+        name=job_name,
+    )
+
+    await update.message.reply_text(
+        f"ГАЗЫ! У вас {duration} сек. Напиши /mask, чтобы выжить."
+    )
+
+
+async def mask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    chat_id = update.effective_chat.id
+    rounds: dict[int, GasRound] = context.bot_data.setdefault("gas_rounds", {})
+    round_state = rounds.get(chat_id)
+    if round_state is None:
+        await update.message.reply_text("Сейчас нет активного раунда газов. Запусти /gazy.")
+        return
+
+    user = update.effective_user
+    if user is None:
+        return
+    _register_participant(update, round_state)
+    round_state.survivors.add(user.id)
+    await update.message.reply_text(f"{_display_name(update)} надел противогаз и выжил.")
+
+
+async def track_gas_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    chat_id = update.effective_chat.id
+    rounds: dict[int, GasRound] = context.bot_data.get("gas_rounds", {})
+    round_state = rounds.get(chat_id)
+    if round_state is None:
+        return
+    _register_participant(update, round_state)
 
 
 async def story_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -456,6 +595,7 @@ def main() -> None:
     application.bot_data["tz"] = tz
     application.bot_data["openrouter_api_key"] = openrouter_api_key
     application.bot_data["story_model"] = story_model
+    application.bot_data["gas_rounds"] = {}
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -465,6 +605,9 @@ def main() -> None:
     application.add_handler(CommandHandler("story", story_cmd))
     application.add_handler(CommandHandler("zona", zona_cmd))
     application.add_handler(CommandHandler("toha", toha_cmd))
+    application.add_handler(CommandHandler("gazy", gazy_cmd))
+    application.add_handler(CommandHandler("mask", mask_cmd))
+    application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, track_gas_activity))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_phrase))
     application.add_handler(MessageHandler(filters.CAPTION & ~filters.COMMAND, track_phrase))
 
